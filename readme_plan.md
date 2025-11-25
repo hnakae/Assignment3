@@ -1,5 +1,8 @@
 # Assignment 3 Implementation Plan (Transactions & Concurrency)
 
+## Prep
+annotate files with labels to show exactly where record locks and mutexes should be taken during insert, update, and delete. (table.py, query.py, )
+
 ## Goals
 - Add transaction semantics (begin/commit/abort with undo) and strict 2PL with no-wait behavior.
 - Make core data paths thread-safe while keeping existing storage/versioning logic intact.
