@@ -1,0 +1,9 @@
+.venv
+__pycache__/
+*.pyc
+/venv
+/CS451
+/data/Grades/*
+/PDFs
+assignment.txt
+testM1.py
