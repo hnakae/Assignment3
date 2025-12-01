@@ -85,13 +85,15 @@ class Query:
             primary_key = columns[self.table.key]
 
             # HOT: shared dict lookup
-            if primary_key in self.table.key_to_rid:
-                return False
+            with self.table.key_to_rid_lock:
+                if primary_key in self.table.key_to_rid:
+                    return False
 
             # HOT: global RID assignment
             # MUTEX or atomic increment required
-            rid = self.table.next_rid
-            self.table.next_rid += 1
+            with self.table.next_rid_lock:
+                rid = self.table.next_rid
+                self.table.next_rid += 1
 
             schema_encoding = '0' * self.table.num_columns
             record_data = [
@@ -104,20 +106,23 @@ class Query:
 
             # HOT: page_directory mutation
             # MUTEX required
-            self.table.page_directory[rid] = record_data
+            with self.table.page_directory_lock:
+                self.table.page_directory[rid] = record_data
 
             # HOT: key_to_rid mutation
             # MUTEX required
-            self.table.key_to_rid[primary_key] = rid
+            with self.table.key_to_rid_lock:
+                self.table.key_to_rid[primary_key] = rid
 
             # HOT: page writes and page metadata mutation
             # MUTEX required via table._append_base_record
-            if getattr(self.table, "_append_base_record", None):
-                positions = self.table._append_base_record(columns)
-                if positions is not None:
-                    # HOT: base_positions update
-                    # MUTEX required
-                    self.table.base_positions[rid] = positions
+            with self.table.page_metadata_lock:
+                if getattr(self.table, "_append_base_record", None):
+                    positions = self.table._append_base_record(columns)
+                    if positions is not None:
+                        # HOT: base_positions update
+                        # MUTEX required
+                        self.table.base_positions[rid] = positions
 
             # HOT: index mutation
             # MUTEX on index
@@ -206,9 +211,11 @@ class Query:
         """
 
         # HOT: shared metadata read
-        base = self.table.page_directory[base_rid]
+        with self.table.page_directory_lock:
+            base = self.table.page_directory[base_rid]
 
-        base_positions = getattr(self.table, "base_positions", {}).get(base_rid)
+        with self.table.page_metadata_lock:
+            base_positions = getattr(self.table, "base_positions", {}).get(base_rid)
 
         # Read base version
         if base_positions:
@@ -230,16 +237,18 @@ class Query:
         tail_records = []
 
         # HOT: repeated access to page_directory
-        while tail_rid != 0:
-            tail = self.table.page_directory[tail_rid]
-            tail_records.append(tail)
-            tail_rid = tail[0]
+        with self.table.page_directory_lock:
+            while tail_rid != 0:
+                tail = self.table.page_directory[tail_rid]
+                tail_records.append(tail)
+                tail_rid = tail[0]
 
         # Apply tail updates
         for tail in reversed(tail_records):
             schema = tail[3]
             tail_rid_local = tail[1]
-            tail_positions = getattr(self.table, "tail_positions", {}).get(tail_rid_local)
+            with self.table.page_metadata_lock:
+                tail_positions = getattr(self.table, "tail_positions", {}).get(tail_rid_local)
 
             for i in range(self.table.num_columns):
                 if schema[i] == '1':
@@ -376,17 +385,19 @@ class Query:
             if len(columns) != self.table.num_columns:
                 return False
 
-            base_rid = self.table.key_to_rid.get(primary_key)
-            if base_rid is None:
-                return False
+            with self.table.key_to_rid_lock:
+                base_rid = self.table.key_to_rid.get(primary_key)
+                if base_rid is None:
+                    return False
 
             # RECORD LOCK should be acquired on base_rid here
 
             # Old value snapshot for index updates
             old_full = self._build_record_from_data(base_rid, [1] * self.table.num_columns)
 
-            base = self.table.page_directory[base_rid]
-            latest_tail_rid = base[0]
+            with self.table.page_directory_lock:
+                base = self.table.page_directory[base_rid]
+                latest_tail_rid = base[0]
 
             schema_bits = ['1' if c is not None else '0' for c in columns]
             schema_encoding = "".join(schema_bits)
@@ -396,27 +407,31 @@ class Query:
 
             # HOT: assign new tail RID
             # MUTEX or atomic needed
-            tail_rid = self.table.next_rid
-            self.table.next_rid += 1
+            with self.table.next_rid_lock:
+                tail_rid = self.table.next_rid
+                self.table.next_rid += 1
 
             tail_values = [c if c is not None else 0 for c in columns]
             tail_data = [latest_tail_rid, tail_rid, int(time()), schema_encoding, *tail_values]
 
             # HOT: add new tail entry
             # MUTEX required
-            self.table.page_directory[tail_rid] = tail_data
+            with self.table.page_directory_lock:
+                self.table.page_directory[tail_rid] = tail_data
 
             # HOT: modify base indirection pointer
             # RECORD LOCK protects this
-            base[0] = tail_rid
+            with self.table.page_directory_lock:
+                base[0] = tail_rid
 
             # HOT: write to tail pages
-            if getattr(self.table, "_append_tail_updates", None):
-                positions = self.table._append_tail_updates(columns)
-                if positions is not None:
-                    # HOT: tail_positions mutation
-                    # MUTEX required
-                    self.table.tail_positions[tail_rid] = positions
+            with self.table.page_metadata_lock:
+                if getattr(self.table, "_append_tail_updates", None):
+                    positions = self.table._append_tail_updates(columns)
+                    if positions is not None:
+                        # HOT: tail_positions mutation
+                        # MUTEX required
+                        self.table.tail_positions[tail_rid] = positions
 
             # HOT: index updates
             # MUTEX on index

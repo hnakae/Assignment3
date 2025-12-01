@@ -5,6 +5,8 @@ from lstore.storage import (
     save_metadata,
     load_metadata,
 )
+from lstore.lock_manager import LockManager
+import threading
 
 INDIRECTION_COLUMN = 0
 RID_COLUMN = 1
@@ -35,6 +37,11 @@ class Table:
         self.num_columns = num_columns
         self.key = key_index
         self.bufferpool = bufferpool
+        self.lock_manager = LockManager()
+        self.page_directory_lock = threading.Lock()
+        self.key_to_rid_lock = threading.Lock()
+        self.next_rid_lock = threading.Lock()
+        self.page_metadata_lock = threading.Lock()
 
         # ensure table directory exists
         ensure_table_dir(self.name)
