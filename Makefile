@@ -10,12 +10,17 @@ m2_tester:
 m3_tester:
 	rm -rf CS451
 	python3 m3_tester_part_1.py
-# 	python3 m3_tester_part_2.py
+	python3 m3_tester_part_2.py	
 
 exam_tester_m2:
 	rm -rf CS451
 	python3 exam_tester_m2_part1.py
 	python3 exam_tester_m2_part2.py
+
+exam_tester_m3:
+	rm -rf CS451
+	python3 exam_tester_m3_part1.py
+	python3 exam_tester_m3_part2.py
 
 clean: 
 	rm -rf CS451
