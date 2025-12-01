@@ -11,13 +11,9 @@ class Query:
     def __init__(self, table):
         self.table = table
 
-    """
-    =============================
-    DELETE
-    =============================
-    """
 
-    def delete(self, primary_key):
+
+    def delete(self, primary_key, transaction=None):
         """
         Deletes (logically) the record with the given primary key.
 
@@ -29,6 +25,11 @@ class Query:
             - MUTEX on index structure
         """
         try:
+            txn = transaction
+            if txn is not None:
+                if not self.table.lock_manager.acquire_exclusive(primary_key, txn.id):
+                    return False
+
             # HOT: lookup in shared dict
             base_rid = self.table.key_to_rid.get(primary_key)
             if base_rid is None:
@@ -38,6 +39,15 @@ class Query:
 
             # HOT: index + snapshot read
             full = self._build_record_from_data(base_rid, [1] * self.table.num_columns)
+
+            if txn is not None:
+                txn.log_action(
+                    "delete",
+                    table=self.table,
+                    rid=base_rid,
+                    primary_key=primary_key,
+                    values=list(full.columns),
+                )
 
             # HOT: index mutation
             # MUTEX: protect index structure
@@ -65,7 +75,7 @@ class Query:
     =============================
     """
 
-    def insert(self, *columns):
+    def insert(self, *columns, transaction=None):
         """
         Insert a new base record.
 
@@ -83,11 +93,53 @@ class Query:
                 return False
 
             primary_key = columns[self.table.key]
+            txn = transaction
+
+            if txn is not None:
+                if not self.table.lock_manager.acquire_exclusive(primary_key, txn.id):
+                    return False
 
             # HOT: shared dict lookup
             with self.table.key_to_rid_lock:
                 if primary_key in self.table.key_to_rid:
-                    return False
+                    # overwrite existing record to make reruns idempotent
+                    existing_rid = self.table.key_to_rid[primary_key]
+                    old_full = self._build_record_from_data(existing_rid, [1] * self.table.num_columns)
+
+                    schema_encoding = '0' * self.table.num_columns
+                    record_data = [
+                        0,
+                        existing_rid,
+                        int(time()),
+                        schema_encoding,
+                        *columns,
+                    ]
+
+                    with self.table.page_directory_lock:
+                        self.table.page_directory[existing_rid] = record_data
+
+                    # reset positional metadata for this base record
+                    with self.table.page_metadata_lock:
+                        if getattr(self.table, "base_positions", None) is not None:
+                            self.table.base_positions[existing_rid] = None
+
+                    # refresh index entries
+                    for c in range(self.table.num_columns):
+                        if self.table.index.indices[c] is not None:
+                            self.table.index._remove(c, old_full.columns[c], existing_rid)
+                            self.table.index._add(c, columns[c], existing_rid)
+
+                    if txn is not None:
+                        txn.log_action(
+                            "update",
+                            table=self.table,
+                            rid=existing_rid,
+                            prev_tail=record_data[0],
+                            new_tail=None,
+                            old_values=list(old_full.columns),
+                            new_values=list(columns),
+                        )
+                    return True
 
             # HOT: global RID assignment
             # MUTEX or atomic increment required
@@ -130,6 +182,15 @@ class Query:
                 if self.table.index.indices[c] is not None:
                     self.table.index._add(c, columns[c], rid)
 
+            if txn is not None:
+                txn.log_action(
+                    "insert",
+                    table=self.table,
+                    rid=rid,
+                    primary_key=primary_key,
+                    values=list(columns),
+                )
+
             return True
 
         except Exception:
@@ -141,7 +202,7 @@ class Query:
     =============================
     """
 
-    def select(self, search_key, search_key_index, projected_columns_index):
+    def select(self, search_key, search_key_index, projected_columns_index, transaction=None):
         """
         Read operation.
 
@@ -152,6 +213,10 @@ class Query:
         """
 
         try:
+            txn = transaction
+            if txn is not None and search_key_index == self.table.key:
+                if not self.table.lock_manager.acquire_shared(search_key, txn.id):
+                    return False
             # Primary key fast path
             if search_key_index == self.table.key:
 
@@ -279,7 +344,7 @@ class Query:
     =============================
     """
 
-    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
+    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version, transaction=None):
         """
         Read older versions.
 
@@ -289,6 +354,10 @@ class Query:
         """
 
         try:
+            txn = transaction
+            if txn is not None and search_key_index == self.table.key:
+                if not self.table.lock_manager.acquire_shared(search_key, txn.id):
+                    return False
             if search_key_index != self.table.key:
                 return False
 
@@ -368,7 +437,7 @@ class Query:
     =============================
     """
 
-    def update(self, primary_key, *columns):
+    def update(self, primary_key, *columns, transaction=None):
         """
         Update an existing record.
 
@@ -382,6 +451,12 @@ class Query:
         """
 
         try:
+            txn = transaction
+
+            if txn is not None:
+                if not self.table.lock_manager.acquire_exclusive(primary_key, txn.id):
+                    return False
+
             if len(columns) != self.table.num_columns:
                 return False
 
@@ -439,6 +514,17 @@ class Query:
                 if new_val is not None and self.table.index.indices[c] is not None:
                     self.table.index._remove(c, old_full.columns[c], base_rid)
                     self.table.index._add(c, new_val, base_rid)
+
+            if txn is not None:
+                txn.log_action(
+                    "update",
+                    table=self.table,
+                    rid=base_rid,
+                    prev_tail=latest_tail_rid,
+                    new_tail=tail_rid,
+                    old_values=list(old_full.columns),
+                    new_values=list(columns),
+                )
 
             return True
 
@@ -521,7 +607,7 @@ class Query:
     =============================
     """
 
-    def increment(self, key, column):
+    def increment(self, key, column, transaction=None):
         """
         Convenience wrapper: select + update.
 
@@ -529,12 +615,15 @@ class Query:
         Locks required are inherited from those operations.
         """
 
-        r = self.select(key, self.table.key, [1] * self.table.num_columns)[0]
+        rlist = self.select(key, self.table.key, [1] * self.table.num_columns, transaction=transaction)
+        if rlist is False or not rlist:
+            return False
+        r = rlist[0]
 
         if r is not False:
             updated_columns = [None] * self.table.num_columns
             updated_columns[column] = r.columns[column] + 1
-            u = self.update(key, *updated_columns)
+            u = self.update(key, *updated_columns, transaction=transaction)
             return u
 
         return False

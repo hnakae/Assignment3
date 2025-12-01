@@ -25,9 +25,7 @@ class Database:
         self.bufferpool = None
 
 
-    # -----------------------------------------------------------
-    #  OPEN DATABASE
-    # -----------------------------------------------------------
+    
     def open(self, path, pool_pages: int = None):
         """
         Open a database stored in the given path.
@@ -58,22 +56,17 @@ class Database:
             if not os.path.isdir(table_dir):
                 continue
 
-            # load any metadata.json if present
+        
             meta = load_metadata(table_name)
             if meta is None:
-                # table exists but no metadata? skip it
                 continue
 
-            # Reconstruct full Table object from metadata
             table = Table.load_from_disk(meta)
-            # attach buffer pool
             table.bufferpool = self.bufferpool
             self.tables[table_name] = table
 
 
-    # -----------------------------------------------------------
-    #  CLOSE DATABASE
-    # -----------------------------------------------------------
+    
     def close(self):
         """
         Flush all table metadata and page data to disk.
@@ -87,9 +80,6 @@ class Database:
                 self.bufferpool.flush_all()
             except Exception:
                 pass
-
-        # Return to project root directory
-        # (prevent path issues on future opens)
         if self.path:
             try:
                 os.chdir("..")
@@ -97,30 +87,25 @@ class Database:
                 pass
 
 
-    # -----------------------------------------------------------
-    #  CREATE TABLE
-    # -----------------------------------------------------------
+    
     def create_table(self, name, num_columns, key_index):
         """
         Create a table and register it with the DB.
         """
         if name in self.tables:
-            raise Exception(f"Table {name} already exists")
+            return self.tables[name]
 
         ensure_table_dir(name)
 
         table = Table(name, num_columns, key_index, bufferpool=self.bufferpool)
         self.tables[name] = table
 
-        # Immediately persist metadata (optional but safe)
+        
         table.flush_to_disk()
 
         return table
 
 
-    # -----------------------------------------------------------
-    #  LOOKUP TABLE
-    # -----------------------------------------------------------
     def get_table(self, name):
         """
         Retrieve an existing table by name.
